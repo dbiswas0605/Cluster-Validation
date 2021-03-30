@@ -14,12 +14,20 @@ namespace solution
             internal int FP = 0;
         }
 
-        static Dictionary<int,Tuple<int,int>> RawData = new Dictionary<int, Tuple<int, int>>();
-        static Dictionary<string,confusionMatrix> OrchestratedData = new Dictionary<string, confusionMatrix>();
+        private class GroungTruthCluster
+        {
+            public int GTclusterid {get; set;}
+            public double correctLabelCount {get; set;}
+        }
+        private class IdentifiedCluster
+        {
+            public int ClusterID;
+            public List<GroungTruthCluster> GroundTruthCluster = new List<GroungTruthCluster>();
+        }
 
-
-        static List<int> input1 = new List<int>();
-        static List<int> input2 = new List<int>();
+        static Dictionary<int,Tuple<int,int>> RawData = new Dictionary<int, Tuple<int,int>>();
+        static Dictionary<string,confusionMatrix> OrchestratedData_Jaccard = new Dictionary<string, confusionMatrix>();
+        static Dictionary<int,IdentifiedCluster> OrchestratedData_NMI = new Dictionary<int, IdentifiedCluster>();
 
         internal static void LoadDataFromFile(string path)
         {
@@ -28,7 +36,7 @@ namespace solution
             var t = Read(lines);
 
             int point = 0;
-            t.ForEach(x=>RawData.Add(point++,Tuple.Create(x.Item1,x.Item2)));
+            t.ForEach(x=>RawData.Add(point++, Tuple.Create(x.Item1,x.Item2)));
         }
 
         internal static void LoadDataFromSTDIN()
@@ -43,9 +51,10 @@ namespace solution
             }
 
             var lines = stdin.Split('\n');
-            var t = Read(lines);
 
             int point = 0;
+
+            var t = Read(lines);
             t.ForEach(x=>RawData.Add(point++,Tuple.Create(x.Item1,x.Item2)));            
         }
 
@@ -71,24 +80,81 @@ namespace solution
                     else if(GTi!=GTj && PRi==PRj)
                         fp=1;
 
-                    OrchestratedData.Add($"{points[i]}-{points[j]}",new confusionMatrix{TP=tp,FN=fn,FP=fp});
+                    OrchestratedData_Jaccard.Add($"{points[i]}-{points[j]}",new confusionMatrix{TP=tp,FN=fn,FP=fp});
                 }
             }
         }
 
-        private static List<Tuple<int, int>> Read(IEnumerable<string> lines)
+        internal static void OrchestrateDataToIdentifiedLabels()
         {
-            List<Tuple<int, int>> temp = new List<Tuple<int, int>>();
+            var groundTruthClusters = RawData.Values.Select(x=>x.Item1).Distinct();
+            var identifiedClusters = RawData.Values.Select(x=>x.Item2).Distinct();
 
-            foreach(var line in lines)
+            foreach(int idc in identifiedClusters)
             {
-                var ln = line.Split(' ');
-                int a = Convert.ToInt32(ln[0]);
-                int b = Convert.ToInt32(ln[1]);
+                IdentifiedCluster i = new IdentifiedCluster();
+                i.ClusterID = idc;
 
-                temp.Add(Tuple.Create<int,int>(a,b));
+                foreach(int gt in groundTruthClusters)
+                {
+                    var pointsInidc = RawData.Where(x=>x.Value.Item2==idc).Select(p=>p.Key);
+                    var pointsInigt = RawData.Where(x=>x.Value.Item1==gt).Select(p=>p.Key);
+
+                    var common = pointsInidc.Intersect(pointsInigt).Count();
+
+                    GroungTruthCluster GT = new GroungTruthCluster
+                    {
+                        GTclusterid=gt,
+                        correctLabelCount=common
+                    };
+
+                    i.GroundTruthCluster.Add(GT);
+                }
+                OrchestratedData_NMI.Add(idc,i);
             }
 
+            var totalPoints = OrchestratedData_NMI.Values.Sum(x=>x.GroundTruthCluster.Sum(p=>p.correctLabelCount));
+
+
+            //Caclulate probability
+            foreach(var idc in OrchestratedData_NMI)
+            {
+                var gts = idc.Value.GroundTruthCluster;
+
+                foreach(var gt in gts)
+                {
+                    gt.correctLabelCount=gt.correctLabelCount/totalPoints;
+                }
+            }
+
+        }
+
+
+        private static List<Tuple<int,int>> Read(string[] lines)
+        {
+            List<Tuple<int,int>> temp = new List<Tuple<int,int>>();
+            string l = string.Empty;
+            foreach(string line in lines)
+            {
+                try
+                {
+                l = line.Trim();
+
+                if(l.Length>0)
+                {
+                    string[] ln = l.Split(' ');
+                    int a = Convert.ToInt32(ln[0].Trim().Replace(" ",""));
+                    int b = Convert.ToInt32(ln[1].Trim().Replace(" ",""));
+                    
+                    temp.Add(Tuple.Create(a,b));
+                }
+                }
+                catch(Exception e)
+                {
+                    Console.WriteLine($"Error : {e.InnerException}. Line = {l}");
+                }
+
+            }
             return temp;
         }
     
@@ -96,32 +162,90 @@ namespace solution
         {
             decimal temp = 0;
 
-            decimal TP = OrchestratedData.Values.Where(x=>x.TP==1).Count();
-            decimal FP = OrchestratedData.Values.Where(x=>x.FP==1).Count();
-            decimal FN = OrchestratedData.Values.Where(x=>x.FN==1).Count();
+            decimal TP = OrchestratedData_Jaccard.Values.Where(x=>x.TP==1).Count();
+            decimal FP = OrchestratedData_Jaccard.Values.Where(x=>x.FP==1).Count();
+            decimal FN = OrchestratedData_Jaccard.Values.Where(x=>x.FN==1).Count();
 
             temp = TP == 0? 0 : TP / (TP+FP+FN);
 
             return Math.Round(temp,3);
         }
 
-        internal static decimal CalculateNormalizedMutualInformation()
+        internal static double CalculateNormalizedMutualInformation()
         {
-            //Yet To IMPLEMENT
-            return 0;
+            //Row Level Sum
+            Dictionary<int,double> sumByCluster = new Dictionary<int, double>();
+            Dictionary<int,double> sumByGT = new Dictionary<int, double>();
+
+          
+            foreach(var kvp in OrchestratedData_NMI)
+            {
+                sumByCluster.Add(kvp.Key, kvp.Value.GroundTruthCluster.Sum(x=>x.correctLabelCount));
+
+                foreach(var gt in kvp.Value.GroundTruthCluster)
+                {
+                    var id = gt.GTclusterid;
+
+                    if(sumByGT.ContainsKey(id))
+                    {
+                        sumByGT[id] += gt.correctLabelCount;
+                    }
+                    else
+                    {
+                        sumByGT.Add(id,gt.correctLabelCount);
+                    }
+                }
+            }
+
+            double IYC = 0;
+            foreach(var idc in OrchestratedData_NMI)
+            {
+                foreach(var gt in idc.Value.GroundTruthCluster)
+                {
+                    if(gt.correctLabelCount>0)
+                    {
+                        double lg = Math.Log10((double)gt.correctLabelCount / ((double)sumByCluster[idc.Key] * (double)sumByGT[gt.GTclusterid]));
+                        IYC += gt.correctLabelCount * lg;
+                    }
+                }
+            }
+            
+            double HC = 0.0;
+
+            foreach(var kvp in sumByCluster)
+            {
+                var v = (double)kvp.Value;
+
+                HC += v * Math.Log10(v) * -1;
+            }
+
+            double HY =0;
+
+            foreach(var kvp in sumByGT)
+            {
+                var v = (double) kvp.Value;
+
+                HY += v * Math.Log10(v) * -1;
+            }
+
+            return Math.Round(IYC/Math.Sqrt(HC*HY),3);
         }
     }
 
-    class Program
+    class Solution
     {
         static void Main(string[] args)
         {
-            loader.LoadDataFromFile(@"testdata\testfile1.txt");
+            loader.LoadDataFromFile(@"testdata\testfile0.txt");
+            //loader.LoadDataFromSTDIN();
+            
             loader.OrchestradeDataToCluster();
-            var resJaccard = loader.CalculateJaccardSimilarity();
+            loader.OrchestrateDataToIdentifiedLabels();
 
-            Console.WriteLine($"{resJaccard}");
-            Console.ReadKey();
+            var resJaccard = loader.CalculateJaccardSimilarity();
+            var resNMI = loader.CalculateNormalizedMutualInformation();
+
+            Console.WriteLine($"{resNMI,0:N3} {resJaccard,0:N3}");
         }
     }
 }
